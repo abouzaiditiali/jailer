@@ -40,18 +40,15 @@ int create_cgroup(int jail_id) {
     /* configure cgroup limits */
     //64 × 1024 × 1024 = 67,108,864 bytes
     if (write_file(memory_path, "67108864") == -1) {
-        perror("write_file memory_path create_cgroup");
         return -1;
     }
     //number of tasks allowed (threads)
     if (write_file(pids_path, "1") == -1) {
-        perror("write_file pids_path create_cgroup");
         return -1;
     }
     //For every 100,000 microseconds = 100 ms, the tasks in this cgroup are 
     //allowed to run for a total of 50,000 microseconds = 50 ms
     if (write_file(cpu_path, "50000 100000") == -1) {
-        perror("write_file cpu_path create_cgroup");
         return -1;
     }
     
@@ -76,6 +73,7 @@ int setup_rootfs(int jail_id) {
     }
 
     /* locate rootfs for the current jail */
+    //consider overlayFS later on
     char rootfs[PATH_MAX];
     if (snprintf(rootfs, sizeof(rootfs), "/var/lib/quickC/rootfs/jail-%d", jail_id) < 0) {
         perror("snprintf rootfs setup_rootfs");
@@ -122,7 +120,7 @@ int setup_rootfs(int jail_id) {
     return 0;    
 }
 
-int setup_clone_arguments(struct clone_args *cl_args) {
+int setup_clone_arguments(struct clone_args *cl_args, int jail_id) {
     cl_args->exit_signal = SIGCHLD;
     cl_args->flags = CLONE_INTO_CGROUP | 
                     CLONE_NEWIPC | 
@@ -140,7 +138,7 @@ int setup_clone_arguments(struct clone_args *cl_args) {
     return 0;
 }
 
-int validate_arguments(int argc, char* argv[]) {
+int extract_argument(int argc, char* argv[]) {
     if (argc != 2) { 
         fprintf(stderr, "Usage: %s <jail_id>\n", argv[0]);
         return -1;
@@ -152,6 +150,37 @@ int validate_arguments(int argc, char* argv[]) {
     return jail_id; 
 }
 
+int setup_userspace(pid_t cpid) {
+    char setgroups_path[PATH_MAX];
+    char uid_map_path[PATH_MAX];
+    char gid_map_path[PATH_MAX];
+    if (snprintf(setgroups_path, sizeof(setgroups_path), "/proc/%d/setgroups", cpid) < 0) {
+        perror("snprintf setgroups_path setup_userspace");
+        return -1;
+    }
+    if (snprintf(uid_map_path, sizeof(uid_map_path), "/proc/%d/uid_map_path", cpid) < 0) {
+        perror("snprintf uid_map_path setup_userspace");
+        return -1;
+    }
+    if (snprintf(gid_map_path, sizeof(gid_map_path), "/proc/%d/gid_map_path", cpid) < 0) {
+        perror("snprintf gid_map_path setup_userspace");
+        return -1;
+    }
+    if (write_file(setgroups_path, "deny\n") == -1) {
+        return -1;
+    }
+        
+    //create an actual unprivileged user for running jails and change these
+    //jailUID HostUID
+    if (write_file(uid_map_path, "0 1000 1\n") == -1) {
+        return -1;
+    }
+    if (write_file(gid_map_path, "0 1000 1\n") == -1) {
+        return -1;
+    }
+    return 0;
+}
+
 int main(int argc, char* argv[]) {
     /* extract arguments */
     int jail_id = extract_argument(argc, argv);
@@ -161,36 +190,72 @@ int main(int argc, char* argv[]) {
 
     /* setup clone arguments + create cgroup */
     struct clone_args cl_args = {0};
-    if (setup_clone_arguments(&cl_args) == -1) {
+    if (setup_clone_arguments(&cl_args, jail_id) == -1) {
         exit(EXIT_FAILURE);
     }
     //new cgroup directory created for current jail at path + open cgfd 
     //make sure to delete directory at path. cgfd will be closed on child exec
 
+    int pipefd[2];
+    if (pipe2(pipefd, O_CLOEXEC) == -1) {
+        err(EXIT_FAILURE, "pipe2");
+    }
+
     /* call clone3 */
     pid_t pid = syscall(SYS_clone3, &cl_args, sizeof(cl_args));
     if (pid == -1) {
-        perror("SYS_clone3 main");
-        exit(EXIT_FAILURE);
+        err(EXIT_FAILURE, "SYS_clone3 main");
     }
 
-    if (pid == 0) {
-        /* private propagation + bind mount + pivot_root */
-        if (setup_rootfs(jail_id) == -1) {
-            exit(EXIT_FAILURE);
+    if (pid == 0) { 
+        if (close(pipefd[1]) == -1) {
+            err(EXIT_FAILURE, "close write end child"); 
+        }
+        char c;
+        /* sleeps until write end is written to, fails if write end is closed */
+        /* waits for parent to setup UID/GID mappings for new userspace */
+        if (read(pipefd[0], &c, 1) != 1) {
+            _exit(EXIT_FAILURE);
+        }
+        if (close(pipefd[0]) == -1) {
+            err(EXIT_FAILURE, "close read end child");
         }
         
-        char exec_path[PATH_MAX];
-        if (snprintf(exec_path, sizeof(exec_path), "/var/lib/quickC/rootfs/jail-%d/program", jail_id) < 0) {
-            perror("snprintf exec_path main");
-            exit(EXIT_FAILURE);
+        /* private propagation + bind mount + pivot_root */
+        if (setup_rootfs(jail_id) == -1) {
+            _exit(EXIT_FAILURE);
         }
-        execve(exec_path);
+        
+        /* execute 'arbitrary' C code */
+        char *child_argv[] = {"/program", NULL};
+        char *env[] = {NULL}; //start child with empty environment
+        execve("/program", child_argv, env);
 
         //execve failed
         perror("execve");
-        _exit(EXIT_FAILURE).
+        _exit(EXIT_FAILURE);
     }
+    
+    if (close(pipefd[0]) == -1) {
+        err(EXIT_FAILURE, "close read end parent");
+    }
+    if (setup_userspace(pid) == -1) {
+        //close on success will have read return 0 (EOF) in child
+        //child exits with failure
+        if (close(pipefd[1]) == -1) {
+            err(EXIT_FAILURE, "close write end parent");  
+        }
+        fprintf(stderr, "setup_userspace failed");
+    } else {
+        char ready = 'X';
+        if (write(pipefd[1], &ready, 1)  != 1) {
+            err(EXIT_FAILURE, "write to write end parent");   
+        }
+        if (close(pipefd[1]) == -1) {
+            err(EXIT_FAILURE, "close write end parent");  
+        }
+    }
+    
 
     int status;
     if (waitpid(pid, &status, 0) == -1) {
