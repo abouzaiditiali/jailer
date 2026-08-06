@@ -42,7 +42,7 @@ int write_file(const char *path, const char *contents) {
 
 int rmdir_cgroup(int jail_id) {
     char path[PATH_MAX];
-    if (snprintf(path, sizeof(path), "/sys/fs/cgroup/system.slice/quickC.slice/runtime.service/jails/jail-%d", jail_id) < 0) {
+    if (snprintf(path, sizeof(path), "/sys/fs/cgroup/quickc/jail-%d", jail_id) < 0) {
         perror("snprintf path remove_cgroup");
         return -1;
     }
@@ -60,7 +60,7 @@ int create_cgroup(int jail_id) {
     char cpu_path[PATH_MAX];
 
     /* build paths for cgroup and resource controllers */
-    if (snprintf(path, sizeof(path), "/sys/fs/cgroup/system.slice/quickC.slice/runtime.service/jails/jail-%d", jail_id) < 0) {
+    if (snprintf(path, sizeof(path), "/sys/fs/cgroup/quickc/jail-%d", jail_id) < 0) {
         perror("snprintf path create_cgroup");
         return -1;
     }
