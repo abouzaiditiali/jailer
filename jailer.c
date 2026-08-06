@@ -1,10 +1,57 @@
-#include <linux/sched.h>    /* Definition of struct clone_args */
-#include <sched.h>          /* Definition of CLONE_* constants */
-#include <sys/syscall.h>    /* Definition of SYS_* constants */
+#define _GNU_SOURCE
+
+#include <linux/sched.h>
+#include <sched.h>
+#include <sys/syscall.h>
 #include <unistd.h>
-
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/mount.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <sys/stat.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <err.h>
+#include <string.h>
+#include <errno.h>
 
+int write_file(const char *path, const char *contents) {
+    int fd = open(path, O_WRONLY);
+    if (fd == -1) {
+        perror("open write_file");
+        return -1;
+    }
+
+    size_t len = strlen(contents);
+
+    if (write(fd, contents, len) != (ssize_t)len) {
+        perror("write write_file");
+        if (close(fd) == -1) {
+            perror("close write_file");
+        }
+        return -1;
+    }
+
+    if (close(fd) == -1) {
+        perror("close 2 write_file");
+        return -1;
+    }
+    return 0;
+}
+
+int rmdir_cgroup(int jail_id) {
+    char path[PATH_MAX];
+    if (snprintf(path, sizeof(path), "/sys/fs/cgroup/system.slice/quickC.slice/runtime.service/jails/jail-%d", jail_id) < 0) {
+        perror("snprintf path remove_cgroup");
+        return -1;
+    }
+    if (rmdir(path) == -1) {    
+        perror("rmdir path remove_cgroup"); 
+        return -1;
+    }
+    return 0;
+}
 
 int create_cgroup(int jail_id) {
     char path[PATH_MAX];
@@ -40,15 +87,18 @@ int create_cgroup(int jail_id) {
     /* configure cgroup limits */
     //64 × 1024 × 1024 = 67,108,864 bytes
     if (write_file(memory_path, "67108864") == -1) {
+        rmdir_cgroup(jail_id);
         return -1;
     }
     //number of tasks allowed (threads)
     if (write_file(pids_path, "1") == -1) {
+        rmdir_cgroup(jail_id);
         return -1;
     }
     //For every 100,000 microseconds = 100 ms, the tasks in this cgroup are 
     //allowed to run for a total of 50,000 microseconds = 50 ms
     if (write_file(cpu_path, "50000 100000") == -1) {
+        rmdir_cgroup(jail_id);
         return -1;
     }
     
@@ -92,8 +142,16 @@ int setup_rootfs(int jail_id) {
         return -1;
     }
 
-    if (mkdir(oldroot, 0755) == -1) {
-        perror("mkdir oldroot setup_rootfs");   
+    /* oldroot must already exist */
+    struct stat st;
+    
+    if (stat(oldroot, &st) == -1) {
+        perror("stat oldroot");
+        return -1;
+    }
+    
+    if (!S_ISDIR(st.st_mode)) {
+        fprintf(stderr, "oldroot is not a directory\n");
         return -1;
     }
 
@@ -109,11 +167,6 @@ int setup_rootfs(int jail_id) {
     
     if (umount2("/oldroot", MNT_DETACH) == -1) {
         perror("umount2 oldroot setup_rootfs");
-        return -1;
-    }
-
-    if (rmdir("/oldroot") == -1) {
-        perror("rmdir oldroot setup_rootfs");
         return -1;
     }
 
@@ -138,7 +191,7 @@ int setup_clone_arguments(struct clone_args *cl_args, int jail_id) {
     return 0;
 }
 
-int extract_argument(int argc, char* argv[]) {
+int extract_argument(int argc, char *argv[]) {
     if (argc != 2) { 
         fprintf(stderr, "Usage: %s <jail_id>\n", argv[0]);
         return -1;
@@ -158,11 +211,11 @@ int setup_userspace(pid_t cpid) {
         perror("snprintf setgroups_path setup_userspace");
         return -1;
     }
-    if (snprintf(uid_map_path, sizeof(uid_map_path), "/proc/%d/uid_map_path", cpid) < 0) {
+    if (snprintf(uid_map_path, sizeof(uid_map_path), "/proc/%d/uid_map", cpid) < 0) {
         perror("snprintf uid_map_path setup_userspace");
         return -1;
     }
-    if (snprintf(gid_map_path, sizeof(gid_map_path), "/proc/%d/gid_map_path", cpid) < 0) {
+    if (snprintf(gid_map_path, sizeof(gid_map_path), "/proc/%d/gid_map", cpid) < 0) {
         perror("snprintf gid_map_path setup_userspace");
         return -1;
     }
@@ -181,94 +234,103 @@ int setup_userspace(pid_t cpid) {
     return 0;
 }
 
-int main(int argc, char* argv[]) {
-    /* extract arguments */
+int main(int argc, char *argv[]) {
     int jail_id = extract_argument(argc, argv);
-    if (jail_id == -1) {
-        exit(EXIT_FAILURE);
-    }
+    if (jail_id == -1)
+        return EXIT_FAILURE;
 
-    /* setup clone arguments + create cgroup */
     struct clone_args cl_args = {0};
-    if (setup_clone_arguments(&cl_args, jail_id) == -1) {
-        exit(EXIT_FAILURE);
-    }
-    //new cgroup directory created for current jail at path + open cgfd 
-    //make sure to delete directory at path. cgfd will be closed on child exec
+    if (setup_clone_arguments(&cl_args, jail_id) == -1)
+        return EXIT_FAILURE;
 
     int pipefd[2];
     if (pipe2(pipefd, O_CLOEXEC) == -1) {
-        err(EXIT_FAILURE, "pipe2");
+        perror("pipe2");
+        close((int)cl_args.cgroup);
+        rmdir_cgroup(jail_id);
+        return EXIT_FAILURE;
     }
 
-    /* call clone3 */
-    pid_t pid = syscall(SYS_clone3, &cl_args, sizeof(cl_args));
+    pid_t pid = (pid_t)syscall(SYS_clone3, &cl_args, sizeof(cl_args));
     if (pid == -1) {
-        err(EXIT_FAILURE, "SYS_clone3 main");
+        perror("clone3");
+        close(pipefd[0]);
+        close(pipefd[1]);
+        close((int)cl_args.cgroup);
+        rmdir_cgroup(jail_id);
+        return EXIT_FAILURE;
     }
 
-    if (pid == 0) { 
-        if (close(pipefd[1]) == -1) {
-            err(EXIT_FAILURE, "close write end child"); 
-        }
+    if (pid == 0) {
+        close((int)cl_args.cgroup);
+        close(pipefd[1]);
+
         char c;
-        /* sleeps until write end is written to, fails if write end is closed */
-        /* waits for parent to setup UID/GID mappings for new userspace */
-        if (read(pipefd[0], &c, 1) != 1) {
+        if (read(pipefd[0], &c, 1) != 1)
             _exit(EXIT_FAILURE);
-        }
-        if (close(pipefd[0]) == -1) {
-            err(EXIT_FAILURE, "close read end child");
-        }
-        
-        /* private propagation + bind mount + pivot_root */
-        if (setup_rootfs(jail_id) == -1) {
+
+        close(pipefd[0]);
+
+        if (setup_rootfs(jail_id) == -1)
             _exit(EXIT_FAILURE);
-        }
-        
-        /* execute 'arbitrary' C code */
+
         char *child_argv[] = {"/program", NULL};
-        char *env[] = {NULL}; //start child with empty environment
+        char *env[] = {NULL};
         execve("/program", child_argv, env);
 
-        //execve failed
         perror("execve");
-        _exit(EXIT_FAILURE);
+        _exit(127);
     }
-    
-    if (close(pipefd[0]) == -1) {
-        err(EXIT_FAILURE, "close read end parent");
-    }
+
+    /* Only the parent reaches this point. */
+    close((int)cl_args.cgroup);
+    close(pipefd[0]);
+
     if (setup_userspace(pid) == -1) {
-        //close on success will have read return 0 (EOF) in child
-        //child exits with failure
-        if (close(pipefd[1]) == -1) {
-            err(EXIT_FAILURE, "close write end parent");  
-        }
-        fprintf(stderr, "setup_userspace failed");
-    } else {
-        char ready = 'X';
-        if (write(pipefd[1], &ready, 1)  != 1) {
-            err(EXIT_FAILURE, "write to write end parent");   
-        }
-        if (close(pipefd[1]) == -1) {
-            err(EXIT_FAILURE, "close write end parent");  
-        }
+        /* Closing the pipe wakes the blocked child with EOF. */
+        close(pipefd[1]);
+        waitpid(pid, NULL, 0);
+        rmdir_cgroup(jail_id);
+        return EXIT_FAILURE;
     }
-    
+
+    char ready = 'X';
+    if (write(pipefd[1], &ready, 1) != 1) {
+        perror("release child");
+        close(pipefd[1]);
+        waitpid(pid, NULL, 0);
+        rmdir_cgroup(jail_id);
+        return EXIT_FAILURE;
+    }
+    close(pipefd[1]);
 
     int status;
-    if (waitpid(pid, &status, 0) == -1) {
-        perror("waitpid main");
-        exit(EXIT_FAILURE);
-    }
-    if (WIFEXITED(status)) {
-        //program succeeded or execve failed
-        printf("Exited with code %d\n", WEXITSTATUS(status));
-    } else if (WIFSIGNALED(status)) {
-        //execve succeeded, program crashed
-        printf("Killed by signal %d\n", WTERMSIG(status));
+    pid_t waited;
+
+    do {
+        waited = waitpid(pid, &status, 0);
+    } while (waited == -1 && errno == EINTR);
+
+    if (waited == -1) {
+        perror("waitpid");
+        rmdir_cgroup(jail_id);
+        return EXIT_FAILURE;
     }
 
-    return 0;
+    /* The only child is gone, so its cgroup is now empty. */
+    if (rmdir_cgroup(jail_id) == -1) {
+        return EXIT_FAILURE;
+    }
+
+    if (WIFEXITED(status)) {
+        printf("Exited with code %d\n", WEXITSTATUS(status));
+        return WEXITSTATUS(status);
+    }
+
+    if (WIFSIGNALED(status)) {
+        printf("Killed by signal %d\n", WTERMSIG(status));
+        return 128 + WTERMSIG(status);
+    }
+
+    return EXIT_FAILURE;
 }
