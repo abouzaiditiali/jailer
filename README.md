@@ -13,22 +13,18 @@ This directory contains one small Linux container runtime.
 - `src/util.c` — writes values to procfs and cgroupfs files
 - `include/jailer.h` — shared configuration and function declarations
 
-## Execution flow
+## Functionality
 
-```text
-open the cgroup prepared by the trusted launcher
-        ↓
-clone one child into new namespaces and the cgroup
-        ↓
-install the UID/GID mapping 
-        ↓
-child selects namespace UID/GID 1000
-        ↓
-child installs its rootfs
-        ↓
-child sets no_new_privs and drops every capability
-        ↓
-execute /program
-        ↓
-parent reaps child and removes cgroup
-```
+A minimal Linux single-process container runtime for statically linked executables.
+
+It provides:
+
+- User, PID, mount, network, UTS, and IPC namespaces
+- UID/GID mapping to a dedicated host account
+- pivot_root() filesystem isolation
+- Preconfigured cgroup resource limits
+- Capability removal
+- no_new_privs
+- Inherited file-descriptor cleanup
+- Signal handling, child reaping, and cgroup cleanup
+- Empty environment and one static /program
