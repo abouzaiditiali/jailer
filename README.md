@@ -32,22 +32,3 @@ execute /program
         ↓
 parent reaps child and removes cgroup
 ```
-
-## Rootfs layout
-
-Each jail uses a directory directly under `/var/lib/quickc`:
-
-```text
-/var/lib/quickc/jail-1/
-├── program
-└── oldroot/
-```
-
-Run it with:
-
-```sh
-sudo ./jailer \
-    jail-1 \
-    /var/lib/quickc/jail-1 \
-    /sys/fs/cgroup/quickc/jail-1
-```
