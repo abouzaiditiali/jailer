@@ -1,6 +1,6 @@
 # quickC jailer
 
-This directory contains one small Linux container runtime.
+A minimal Linux single-process container runtime for statically linked executables.
 
 ## Files
 
@@ -15,11 +15,7 @@ This directory contains one small Linux container runtime.
 
 ## Functionality
 
-A minimal Linux single-process container runtime for statically linked executables.
-
-It provides:
-
-- User, PID, mount, network, UTS, and IPC namespaces
+- New user, PID, mount, network, UTS, and IPC namespaces
 - UID/GID mapping to a dedicated host account
 - pivot_root() filesystem isolation
 - Preconfigured cgroup resource limits
