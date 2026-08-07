@@ -3,6 +3,8 @@
 #include "jailer.h"
 
 #include <errno.h>
+#include <limits.h>
+#include <linux/close_range.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/wait.h>
@@ -61,6 +63,12 @@ _Noreturn void child_run(const struct jail_config *config, int cgroup_fd,
     if (read(pipefd[0], &ready, 1) != 1)
         _exit(EXIT_FAILURE);
     close(pipefd[0]);
+
+    /* Keep only stdin, stdout, and stderr for the workload. */
+    if (close_range(3, UINT_MAX, CLOSE_RANGE_UNSHARE) == -1) {
+        perror("close inherited file descriptors");
+        _exit(EXIT_FAILURE);
+    }
 
     if (userns_set_child_identity() == -1)
         _exit(EXIT_FAILURE);
