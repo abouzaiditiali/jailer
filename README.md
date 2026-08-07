@@ -1,4 +1,4 @@
-# quickC jailer
+# quickC-jailer
 
 A minimal Linux single-process container runtime for statically linked executables.
 
